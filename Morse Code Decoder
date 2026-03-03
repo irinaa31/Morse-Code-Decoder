@@ -1,0 +1,144 @@
+“morse.h”
+
+#ifndef MORSE_H
+#define MORSE_H
+#include <stdint.h>
+#define MAX_MORSE 8
+extern volatile char morseBuffer[MAX_MORSE + 1];
+extern volatile uint8_t morseLength;
+extern volatile uint8_t pauseCounter;
+void decodeMorseBuffer(void);
+void triggerSosAlarm(void);
+#endif
+codul principal:
+#include <mega164.h>
+#include "morse.h"
+#include <stdint.h>
+#include <delay.h>
+#define LED_IDLE PORTB0
+#define LED_ALARM_MASK ((1<<PORTB1)|(1<<PORTB2)|(1<<PORTB3))
+#define LED_TX PORTB5
+volatile enum { STATE_WAIT, STATE_RECV, STATE_PROC, STATE_SOS
+}fsmState;
+fsmState = STATE_WAIT;
+volatile char morseBuffer[MAX_MORSE + 1];
+volatile uint8_t morseLength;
+volatile uint8_t pauseCounter;
+static void uart0_init(void)
+{
+ UBRR0H = 0;
+UBRR0L = 64; 
+ UCSR0B = (1<<RXEN0) | (1<<TXEN0);
+ UCSR0C = (1<<UCSZ01) | (1<<UCSZ00);
+}
+int putchar(char c)
+{
+ while (!(UCSR0A & (1<<UDRE0)));
+ UDR0 = c;
+ return c;
+}
+interrupt [EXT_INT0] void ext_int0_isr(void)
+{
+ if (fsmState == STATE_WAIT) { fsmState = STATE_RECV; PORTB &=
+~(1<<LED_IDLE); }
+ if (morseLength < MAX_MORSE) morseBuffer[morseLength++] = 0;
+ pauseCounter = 0;
+}
+interrupt [EXT_INT1] void ext_int1_isr(void)
+{
+ if (fsmState == STATE_WAIT) { fsmState = STATE_RECV; PORTB &=
+~(1<<LED_IDLE); }
+ if (morseLength < MAX_MORSE) morseBuffer[morseLength++] = 1;
+ pauseCounter = 0;
+}
+interrupt [TIM0_OVF] void timer0_ovf_isr(void)
+{
+TCNT0=0x3C;
+if (fsmState == STATE_RECV && ++pauseCounter >= 50)
+ fsmState = STATE_PROC;
+typedef struct { uint16_t code; uint8_t len; char ascii; } MorsePair;
+static const MorsePair tbl[] =
+{
+ {0b01, 2, 'A'}, {0b1000, 4, 'B'}, {0b1010, 4, 'C'}, {0b100,
+3, 'D'},
+ {0b0, 1, 'E'}, {0b0010, 4, 'F'}, {0b110, 3, 'G'}, {0b0000,
+4, 'H'},
+ {0b00, 2, 'I'}, {0b0111, 4, 'J'}, {0b101, 3, 'K'}, {0b0100,
+4, 'L'},
+ {0b11, 2, 'M'}, {0b10, 2, 'N'}, {0b111, 3, 'O'}, {0b0110,
+4, 'P'},
+ {0b1101, 4, 'Q'}, {0b010, 3, 'R'}, {0b000, 3, 'S'}, {0b1,
+1, 'T'},{0b001, 3, 'U'}, {0b0001, 4, 'V'}, {0b011, 3, 'W'}, {0b1001,
+4, 'X'},
+ {0b1011, 4, 'Y'}, {0b1100, 4, 'Z'},
+ {0b11111, 5, '0'}, {0b01111,5, '1'}, {0b00111,5, '2'},
+{0b00011,5, '3'},
+ {0b00001, 5, '4'}, {0b00000,5, '5'}, {0b10000,5, '6'},
+{0b11000,5, '7'},
+ {0b11100, 5, '8'}, {0b11110,5, '9'}
+};
+static char lookup(uint16_t code, uint8_t len)
+{
+ uint8_t i;
+ for (i = 0; i < sizeof(tbl)/sizeof(tbl[0]); ++i)
+ if (tbl[i].len == len && tbl[i].code == code)
+ return tbl[i].ascii;
+ return '?';
+}
+static void flashTxLed(void)
+{ PORTB |= (1<<LED_TX);
+ delay_ms(40);
+ PORTB &= ~(1<<LED_TX);
+}
+void triggerSosAlarm(void)
+{
+ uint8_t i;
+ fsmState = STATE_SOS;
+ for ( i = 0; i < 20; ++i) { // 20×500 ms = 10 s
+ PORTB ^= LED_ALARM_MASK;
+ delay_ms(500);
+ }
+ PORTB &= ~LED_ALARM_MASK;
+ morseLength = 0;
+ fsmState = STATE_WAIT;
+}
+void decodeMorseBuffer(void)
+{
+uint16_t code=0;
+int8_t i;
+if (morseLength == 9 &&morseBuffer[0]==0 && morseBuffer[1]==0 && morseBuffer[2]==0
+&&
+ morseBuffer[3]==1 && morseBuffer[4]==1 && morseBuffer[5]==1
+&&
+ morseBuffer[6]==0 && morseBuffer[7]==0 && morseBuffer[8]==0)
+ {
+ triggerSosAlarm();
+ return;
+ }
+ for (i = morseLength-1; i >= 0; --i)
+ code = (code << 1) | morseBuffer[i];
+ putchar( lookup(code, morseLength) );
+ flashTxLed();
+}
+void main(void)
+{
+uart0_init();
+#pragma optsizeCLKPR=(1<<CLKPCE);
+CLKPR=(0<<CLKPCE) | (0<<CLKPS3) | (0<<CLKPS2) | (0<<CLKPS1) |
+(0<<CLKPS0);
+#ifdef _OPTIMIZE_SIZE_
+#pragma optsize+
+#endif
+#asm("sei")
+while (1)
+ {
+
+ if (fsmState == STATE_PROC)
+ {
+ decodeMorseBuffer();
+ morseLength = pauseCounter = 0;
+ fsmState = STATE_WAIT;
+ PORTB |= (1<<LED_IDLE);
+ }
+ }
+}
